@@ -47,12 +47,37 @@ ROLE_LABELS = {
     "portfolio_manager": {"english": "portfolio_manager", "chinese": "投资组合经理"},
 }
 
+NUMERIC_TOKEN_PATTERN = re.compile(
+    r"[+-]?\s*[$€£¥]?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:%|[KMBT])?",
+    re.IGNORECASE,
+)
+
+
+class CodexExecutionError(RuntimeError):
+    """Raised when a Codex CLI role process exits unsuccessfully."""
+
+    def __init__(
+        self,
+        *,
+        role: str,
+        exit_code: int,
+        log_path: Path,
+        detail: str,
+    ) -> None:
+        self.role = role
+        self.exit_code = exit_code
+        self.log_path = log_path
+        super().__init__(
+            f"Codex role '{role}' failed with exit code {exit_code}. {detail} "
+            f"See {log_path}."
+        )
+
 
 @dataclass(frozen=True)
 class CodexAnalysisConfig:
     ticker: str
     analysis_date: str
-    model: str = "gpt-5.4"
+    model: str = "gpt-5.5"
     analysts: tuple[str, ...] = ("market", "news", "social", "fundamentals")
     include_synthesis: bool = True
     use_search: bool = False
@@ -214,6 +239,7 @@ def _run_role(
     prompt = _build_role_prompt(role, bundle, context_paths, report_paths, schema_path, config)
 
     return _run_codex_json_prompt(
+        role=role,
         prompt=prompt,
         schema_path=schema_path,
         output_path=output_path,
@@ -227,6 +253,7 @@ def _run_role(
 
 def _run_codex_json_prompt(
     *,
+    role: str,
     prompt: str,
     schema_path: Path,
     output_path: Path,
@@ -274,18 +301,45 @@ def _run_codex_json_prompt(
         capture_output=True,
         check=False,
     )
-    log_path.write_text(
-        completed.stdout + ("\n" + completed.stderr if completed.stderr else ""),
-        encoding="utf-8",
-    )
+    log_text = completed.stdout + ("\n" + completed.stderr if completed.stderr else "")
+    log_path.write_text(log_text, encoding="utf-8")
     if completed.returncode != 0:
-        raise RuntimeError(
-            f"Codex role '{role}' failed with exit code {completed.returncode}. "
-            f"See {log_path}."
+        raise CodexExecutionError(
+            role=role,
+            exit_code=completed.returncode,
+            log_path=log_path,
+            detail=_codex_failure_detail(log_text),
         )
 
     raw_output = output_path.read_text(encoding="utf-8")
     return json.loads(clean_json_text(raw_output))
+
+
+def _codex_failure_detail(log_text: str) -> str:
+    usage_limit = _extract_usage_limit_message(log_text)
+    if usage_limit:
+        return (
+            f"{usage_limit} Retry after the reset time, reduce --max-parallel, "
+            "or choose a lighter model such as gpt-5.4-mini."
+        )
+
+    excerpt = _log_excerpt(log_text)
+    if excerpt:
+        return f"Last Codex output:\n{excerpt}\n"
+
+    return "Codex produced no diagnostic output."
+
+
+def _extract_usage_limit_message(log_text: str) -> str | None:
+    for line in log_text.splitlines():
+        if "usage limit" in line.lower():
+            return re.sub(r"^ERROR:\s*", "", line.strip())
+    return None
+
+
+def _log_excerpt(log_text: str, *, max_lines: int = 8) -> str:
+    lines = [line for line in log_text.splitlines() if line.strip()]
+    return "\n".join(lines[-max_lines:])
 
 
 def _build_codex_subprocess_env() -> dict[str, str]:
@@ -387,26 +441,59 @@ def _translate_results(
         schema_path = bundle.schemas_dir / f"{role}.translated.schema.json"
         output_path = bundle.logs_dir / f"{role}.translated.last_message.json"
         log_path = bundle.logs_dir / f"{role}.translated.exec.log"
+        integrity_path = bundle.logs_dir / f"{role}.translation_integrity.json"
         schema_path.write_text(
             json.dumps(_schema_for_payload_shape(payload), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        prompt = _build_translation_prompt(
-            role=role,
-            source_path=source_path,
-            schema_path=schema_path,
-            target_language=config.output_language,
-        )
-        translated[role] = _run_codex_json_prompt(
-            prompt=prompt,
-            schema_path=schema_path,
-            output_path=output_path,
-            log_path=log_path,
-            model=config.model,
-            reasoning_effort="low",
-            use_search=False,
-            command_path=config.command_path(),
-        )
+        source_json = json.dumps(payload, indent=2, ensure_ascii=False)
+        mismatches: list[dict[str, Any]] = []
+        candidate: Any = None
+        for attempt in range(2):
+            prompt = _build_translation_prompt(
+                role=role,
+                source_path=source_path,
+                source_json=source_json,
+                schema_path=schema_path,
+                target_language=config.output_language,
+                numeric_mismatches=mismatches,
+            )
+            candidate = _run_codex_json_prompt(
+                role=role,
+                prompt=prompt,
+                schema_path=schema_path,
+                output_path=output_path,
+                log_path=log_path,
+                model=config.model,
+                reasoning_effort="low",
+                use_search=False,
+                command_path=config.command_path(),
+            )
+            mismatches = _find_numeric_token_mismatches(payload, candidate)
+            if not mismatches:
+                break
+
+        if mismatches:
+            candidate, repaired_paths = _repair_numeric_token_mismatches(payload, candidate)
+            integrity_path.write_text(
+                json.dumps(
+                    {
+                        "role": role,
+                        "status": "repaired",
+                        "message": (
+                            "Numeric tokens changed during translation. "
+                            "Affected string fields were restored from the English source."
+                        ),
+                        "mismatches": mismatches,
+                        "repaired_paths": repaired_paths,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        translated[role] = candidate
     return translated
 
 
@@ -414,22 +501,132 @@ def _build_translation_prompt(
     *,
     role: str,
     source_path: Path,
+    source_json: str,
     schema_path: Path,
     target_language: str,
+    numeric_mismatches: list[dict[str, Any]] | None = None,
 ) -> str:
-    return "\n".join(
+    lines = [
+        f"Translate the report JSON for role '{role}' into {target_language}.",
+        f"The source JSON is also saved at {source_path}.",
+        f"Your output must match the JSON schema at {schema_path}.",
+        "Rules:",
+        "1. Preserve JSON keys and structure exactly.",
+        "2. This is translation only. Do not perform new analysis, update facts, replace the thesis, or invent content.",
+        "3. Preserve every numeric token exactly, including dates, prices, percentages, ranges, currency symbols, decimals, and K/M/B/T suffixes.",
+        "4. Translate all user-facing English text into natural Simplified Chinese when target language is Chinese.",
+        "5. Translate rating words, but do not translate or alter tickers, dates, prices, percentages, or other numeric values.",
+        "6. Return exactly one JSON object and nothing else.",
+    ]
+    if numeric_mismatches:
+        lines.extend(
+            [
+                "The previous translation changed numeric tokens at these paths. Fix them exactly:",
+                json.dumps(numeric_mismatches, indent=2, ensure_ascii=False),
+            ]
+        )
+    lines.extend(
         [
-            f"Translate the report JSON for role '{role}' into {target_language}.",
-            f"Read the source JSON from {source_path}.",
-            f"Your output must match the JSON schema at {schema_path}.",
-            "Rules:",
-            "1. Preserve JSON keys and structure exactly.",
-            "2. Preserve role, ticker, analysis_date, numeric values, and symbol formatting exactly.",
-            "3. Translate all user-facing English text into natural Simplified Chinese when target language is Chinese.",
-            "4. Translate rating values to the target language as well.",
-            "5. Return exactly one JSON object and nothing else.",
+            "Source JSON to translate exactly:",
+            "```json",
+            source_json,
+            "```",
         ]
     )
+    return "\n".join(lines)
+
+
+def _numeric_tokens(text: str) -> tuple[str, ...]:
+    return tuple(
+        re.sub(r"\s+", "", match.group(0)).replace(",", "").upper()
+        for match in NUMERIC_TOKEN_PATTERN.finditer(text)
+    )
+
+
+def _find_numeric_token_mismatches(
+    source: Any,
+    translated: Any,
+    *,
+    path: str = "$",
+) -> list[dict[str, Any]]:
+    if isinstance(source, str) and isinstance(translated, str):
+        source_tokens = _numeric_tokens(source)
+        translated_tokens = _numeric_tokens(translated)
+        if source_tokens != translated_tokens:
+            return [
+                {
+                    "path": path,
+                    "source_tokens": source_tokens,
+                    "translated_tokens": translated_tokens,
+                }
+            ]
+        return []
+    if isinstance(source, dict) and isinstance(translated, dict):
+        mismatches: list[dict[str, Any]] = []
+        for key, source_value in source.items():
+            if key in translated:
+                mismatches.extend(
+                    _find_numeric_token_mismatches(
+                        source_value,
+                        translated[key],
+                        path=f"{path}.{key}",
+                    )
+                )
+        return mismatches
+    if isinstance(source, list) and isinstance(translated, list):
+        mismatches = []
+        for index, source_value in enumerate(source):
+            if index < len(translated):
+                mismatches.extend(
+                    _find_numeric_token_mismatches(
+                        source_value,
+                        translated[index],
+                        path=f"{path}[{index}]",
+                    )
+                )
+        return mismatches
+    return []
+
+
+def _repair_numeric_token_mismatches(
+    source: Any,
+    translated: Any,
+    *,
+    path: str = "$",
+) -> tuple[Any, list[str]]:
+    if isinstance(source, str) and isinstance(translated, str):
+        if _numeric_tokens(source) != _numeric_tokens(translated):
+            return source, [path]
+        return translated, []
+    if isinstance(source, dict) and isinstance(translated, dict):
+        repaired = dict(translated)
+        repaired_paths: list[str] = []
+        for key, source_value in source.items():
+            if key not in repaired:
+                continue
+            repaired_value, child_paths = _repair_numeric_token_mismatches(
+                source_value,
+                repaired[key],
+                path=f"{path}.{key}",
+            )
+            repaired[key] = repaired_value
+            repaired_paths.extend(child_paths)
+        return repaired, repaired_paths
+    if isinstance(source, list) and isinstance(translated, list):
+        repaired = list(translated)
+        repaired_paths = []
+        for index, source_value in enumerate(source):
+            if index >= len(repaired):
+                continue
+            repaired_value, child_paths = _repair_numeric_token_mismatches(
+                source_value,
+                repaired[index],
+                path=f"{path}[{index}]",
+            )
+            repaired[index] = repaired_value
+            repaired_paths.extend(child_paths)
+        return repaired, repaired_paths
+    return translated, []
 
 
 def _schema_for_payload_shape(payload: Any, *, key_name: str | None = None) -> dict[str, Any]:

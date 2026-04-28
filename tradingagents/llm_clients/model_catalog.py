@@ -13,10 +13,12 @@ MODEL_OPTIONS: ProviderModeOptions = {
         "quick": [
             ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
             ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
+            ("GPT-5.5 - Frontier reasoning model", "gpt-5.5"),
             ("GPT-5.4 - Latest frontier, 1M context", "gpt-5.4"),
             ("GPT-4.1 - Smartest non-reasoning model", "gpt-4.1"),
         ],
         "deep": [
+            ("GPT-5.5 - Frontier reasoning model", "gpt-5.5"),
             ("GPT-5.4 - Latest frontier, 1M context", "gpt-5.4"),
             ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
             ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
@@ -75,8 +77,43 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Grok 4.1 Fast (Non-Reasoning) - Speed optimized, 2M ctx", "grok-4-1-fast-non-reasoning"),
         ],
     },
-    # OpenRouter models are fetched dynamically at CLI runtime.
-    # No static entries needed; any model ID is accepted by the validator.
+    "deepseek": {
+        "quick": [
+            ("DeepSeek V3.2", "deepseek-chat"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("DeepSeek V3.2 (thinking)", "deepseek-reasoner"),
+            ("DeepSeek V3.2", "deepseek-chat"),
+            ("Custom model ID", "custom"),
+        ],
+    },
+    "qwen": {
+        "quick": [
+            ("Qwen 3.5 Flash", "qwen3.5-flash"),
+            ("Qwen Plus", "qwen-plus"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("Qwen 3.6 Plus", "qwen3.6-plus"),
+            ("Qwen 3.5 Plus", "qwen3.5-plus"),
+            ("Qwen 3 Max", "qwen3-max"),
+            ("Custom model ID", "custom"),
+        ],
+    },
+    "glm": {
+        "quick": [
+            ("GLM-4.7", "glm-4.7"),
+            ("GLM-5", "glm-5"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("GLM-5.1", "glm-5.1"),
+            ("GLM-5", "glm-5"),
+            ("Custom model ID", "custom"),
+        ],
+    },
+    # OpenRouter: fetched dynamically. Azure: any deployed model name.
     "ollama": {
         "quick": [
             ("Qwen3:latest (8B, local)", "qwen3:latest"),

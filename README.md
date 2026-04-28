@@ -10,15 +10,28 @@
 - 新增 `tradingagents codex-analyze` 命令
 - 启动后提供和旧版接近的终端交互式选择界面
 - 按角色执行 Codex 工作流：`market/news/social/fundamentals -> bull/bear -> research_manager -> trader -> risk -> portfolio_manager`
+- Codex 模式默认使用 `gpt-5.5`，也可以在命令行或交互界面选择其他模型
 - 将最终保存的 JSON/Markdown 报告自动翻译为中文
 - 同时保留英文原稿，便于核对：`*.en.json`、`*.en.md`、`complete_report.en.md`
 - 保留原版 `tradingagents analyze` 能力，仍可走 API / provider 模式
+
+## 上游同步
+
+当前分支已同步 `TauricResearch/TradingAgents` 的 `v0.2.4` 更新，包含：
+
+- Research Manager、Trader、Portfolio Manager 结构化输出
+- LangGraph checkpoint/resume
+- 持久化 decision log
+- DeepSeek、Qwen、GLM、Azure OpenAI provider
+- Docker 与 Windows UTF-8 相关修复
+
+完整上游变更可查看 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 工作流模式
 
 | 模式 | 命令 | 说明 |
 | --- | --- | --- |
-| 原版 API 模式 | `tradingagents analyze` | 继续使用项目里的 provider 配置、LangGraph 图和 API Key |
+| 原版 API 模式 | `tradingagents analyze` | 使用项目里的 provider 配置、LangGraph 图和 API Key |
 | Codex 模式 | `tradingagents codex-analyze` | 直接调用本机 Codex CLI 执行每个角色，不依赖项目内 OpenAI API Key |
 
 Codex 模式下，项目会优先使用本地数据上下文和 `yfinance` 构建角色输入；如果开启 `--search`，Codex 还能补充实时网络检索。
@@ -95,12 +108,19 @@ cp .env.example .env
 
 如果你仍然要运行原版 API 模式，再按需填写：
 
-- `OPENAI_API_KEY`
-- `GOOGLE_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `XAI_API_KEY`
-- `OPENROUTER_API_KEY`
-- `ALPHA_VANTAGE_API_KEY`
+```bash
+export OPENAI_API_KEY=...          # OpenAI
+export GOOGLE_API_KEY=...          # Google Gemini
+export ANTHROPIC_API_KEY=...       # Anthropic Claude
+export XAI_API_KEY=...             # xAI Grok
+export DEEPSEEK_API_KEY=...        # DeepSeek
+export DASHSCOPE_API_KEY=...       # Qwen
+export ZHIPU_API_KEY=...           # GLM
+export OPENROUTER_API_KEY=...      # OpenRouter
+export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+```
+
+企业 provider 可复制 `.env.enterprise.example` 为 `.env.enterprise` 后填写凭据。
 
 ## 使用方式
 
@@ -136,7 +156,7 @@ tradingagents codex-analyze
 tradingagents codex-analyze \
   --ticker AAPL \
   --analysis-date 2026-04-18 \
-  --model gpt-5.4 \
+  --model gpt-5.5 \
   --output-language Chinese \
   --reasoning-effort medium \
   --search
@@ -180,20 +200,29 @@ codex_runs/<ticker>/<date>/logs/<role>.exec.log
 codex_runs/<ticker>/<date>/logs/<role>.translated.exec.log
 ```
 
-## 当前仓库的关键改动
+## 原版 API 模式补充
 
-- CLI 新增 `codex-analyze`
-- CLI 补齐交互式选项选择
-- 新增 `tradingagents/codex_workflow/`
-- 新增中文翻译收尾阶段
-- 新增 Codex 相关测试：
-  - `tests/test_cli_codex.py`
-  - `tests/test_codex_workflow.py`
+`tradingagents analyze` 现在支持 OpenAI、Google、Anthropic、xAI、DeepSeek、Qwen、GLM、OpenRouter、Ollama、Azure OpenAI 等 provider。
+
+Checkpoint resume 是可选项：
+
+```bash
+tradingagents analyze --checkpoint
+tradingagents analyze --clear-checkpoints
+```
+
+Decision log 默认启用，会写入 `~/.tradingagents/memory/trading_memory.md`。可用 `TRADINGAGENTS_MEMORY_LOG_PATH` 覆盖路径。
 
 ## 测试
 
 ```bash
 pytest tests/test_codex_workflow.py tests/test_cli_codex.py -q
+```
+
+上游同步后的完整测试集也可以运行：
+
+```bash
+pytest -q
 ```
 
 ## 已知说明
